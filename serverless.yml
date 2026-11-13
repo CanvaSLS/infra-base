@@ -1,0 +1,74 @@
+# infra-base · recursos COMPARTIDOS de eventos y archivos (despliega PRIMERO)
+#   - Topic SNS "sp-eventos"  : bus de eventos (pub/sub). Los productores publican; cada consumidor
+#                               crea su propia cola + suscripción con filtro en SU serverless.yml.
+#   - Bucket S3 "sp-storage"  : materiales y entregas; prefijo tenant_id=<TENANT>/ por institución.
+#   - RDS MySQL "sp-rds"      : UNA instancia, un ESQUEMA POR TENANT (cursos_<tenant>, evaluaciones_<tenant>).
+#                               Requiere:  export DB_PASSWORD='...'  (8+ caracteres, sin / @ " ni espacios)
+service: sp-infra
+
+provider:
+  name: aws
+  region: us-east-1
+
+resources:
+  Resources:
+    TopicoEventos:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: sp-eventos-${sls:stage}
+        DisplayName: StudyPulse eventos
+
+    Almacenamiento:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: sp-storage-${aws:accountId}-${sls:stage}
+        PublicAccessBlockConfiguration:         # privado: solo URLs prefirmadas
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:                       # cifrado en reposo (tema 6.7.3)
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+        CorsConfiguration:                      # el navegador sube/baja directo con URL prefirmada
+          CorsRules:
+            - AllowedOrigins: ['*']
+              AllowedMethods: [GET, PUT, HEAD]
+              AllowedHeaders: ['*']
+              ExposedHeaders: [ETag]
+              MaxAge: 3000
+
+    SgBaseDatos:               # sin VpcId => VPC por defecto de la cuenta
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: StudyPulse RDS MySQL (puerto 3306)
+        SecurityGroupIngress:
+          # Laboratorio: las Lambdas no están en VPC y no tienen IP fija, por eso el puerto queda abierto
+          # y la protección es la contraseña. En producción: Lambdas en subredes privadas + SG a SG.
+          - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, CidrIp: 0.0.0.0/0 }
+
+    BaseDatos:
+      Type: AWS::RDS::DBInstance
+      Properties:
+        DBInstanceIdentifier: sp-rds-${sls:stage}
+        Engine: mysql
+        EngineVersion: '8.0'
+        DBInstanceClass: db.t3.micro
+        AllocatedStorage: '20'
+        StorageType: gp2
+        MasterUsername: admin
+        MasterUserPassword: ${env:DB_PASSWORD}
+        PubliclyAccessible: true
+        MultiAZ: false
+        BackupRetentionPeriod: 0
+        DeletionProtection: false
+        VPCSecurityGroups:
+          - { Fn::GetAtt: [SgBaseDatos, GroupId] }
+
+  Outputs:
+    DbEndpoint:
+      Value: { Fn::GetAtt: [BaseDatos, Endpoint.Address] }
+    TopicArn:
+      Value: { Ref: TopicoEventos }
+    BucketName:
+      Value: { Ref: Almacenamiento }
